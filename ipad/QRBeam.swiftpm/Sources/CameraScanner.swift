@@ -8,6 +8,7 @@ final class CameraScanner: NSObject, ObservableObject, AVCaptureMetadataOutputOb
     @Published private(set) var isRunning = false
 
     var onCode: ((String) -> Void)?
+    var acceptedPrefixes: [String] = [qrWirePrefix]
 
     private let sessionQueue = DispatchQueue(label: "QRBeam.camera.session")
     private let metadataQueue = DispatchQueue(label: "QRBeam.camera.metadata", qos: .userInitiated)
@@ -119,9 +120,8 @@ final class CameraScanner: NSObject, ObservableObject, AVCaptureMetadataOutputOb
         from connection: AVCaptureConnection
     ) {
         for case let object as AVMetadataMachineReadableCodeObject in metadataObjects {
-            guard object.type == .qr,
-                  let value = object.stringValue,
-                  value.hasPrefix(qrWirePrefix) else { continue }
+            guard object.type == .qr, let value = object.stringValue else { continue }
+            guard acceptedPrefixes.isEmpty || acceptedPrefixes.contains(where: value.hasPrefix) else { continue }
 
             let now = Date()
             if value == lastCode && now.timeIntervalSince(lastCodeTime) < 0.025 { continue }
