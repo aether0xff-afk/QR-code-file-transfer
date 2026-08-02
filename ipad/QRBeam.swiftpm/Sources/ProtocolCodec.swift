@@ -277,7 +277,8 @@ func safeFilename(_ value: String) -> String {
 }
 
 func genericFilename(for transferID: Data) -> String {
-    "received_\(transferID.prefix(6).map { String(format: \"%02x\", $0) }.joined()).bin"
+    let prefix = transferID.prefix(6).map { String(format: "%02x", $0) }.joined()
+    return "received_\(prefix).bin"
 }
 
 func randomTransferID() -> Data {
