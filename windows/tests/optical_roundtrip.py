@@ -1,4 +1,4 @@
-"""Optional deterministic integration test: render every frame and decode it with OpenCV."""
+"""Deterministic integration test: render every frame and decode it with OpenCV."""
 from __future__ import annotations
 
 import sys
@@ -17,7 +17,7 @@ from receiver_state import ReceiverStore
 
 
 def main() -> None:
-    # A moderate-density QR keeps this CI-style image test reliable across OpenCV builds.
+    # Keep this CI optical sample moderate-density across OpenCV versions.
     source = bytes(range(256)) * 4 + b"end"
     with tempfile.TemporaryDirectory() as temp:
         path = Path(temp) / "optical_roundtrip.bin"
@@ -26,14 +26,8 @@ def main() -> None:
 
         # Remove randomness so every run produces identical QR matrices.
         package.transfer_id = bytes(range(16))
-        package._manifest_frame = encode_packet(  # noqa: SLF001 - deterministic test fixture
-            Packet(
-                PacketType.MANIFEST,
-                package.transfer_id,
-                0,
-                package.total,
-                package.manifest.to_bytes(),
-            )
+        package._core_frame = encode_packet(  # noqa: SLF001 - deterministic test fixture
+            Packet(PacketType.CORE, package.transfer_id, 0, package.total, package.core.to_bytes())
         )
 
         store = ReceiverStore()
@@ -54,8 +48,8 @@ def main() -> None:
         assert transfer.is_complete()
         assert transfer.assemble() == source
         print(
-            f"Optical round-trip OK: {package.total} chunks, "
-            f"{package.cycle_frame_count} QR frames"
+            f"Optical round-trip OK: {package.total} data chunks, "
+            f"{package.cycle_frame_count} total QR frames"
         )
 
 
