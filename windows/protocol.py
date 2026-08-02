@@ -4,19 +4,22 @@ import base64
 import hashlib
 import json
 import math
+import mimetypes
 import os
 import struct
 import zlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import IntEnum
 from pathlib import Path
 from typing import Iterator
 
-WIRE_PREFIX = "QRF1:"
-MAGIC = b"QRF1"
-VERSION = 1
-DEFAULT_CHUNK_SIZE = 700
-MANIFEST_INTERVAL = 24
+WIRE_PREFIX = "QRF2:"
+MAGIC = b"QRF2"
+VERSION = 2
+DEFAULT_CHUNK_SIZE = 1400
+CORE_INTERVAL = 96
+PARITY_GROUP_SIZE = 8
 
 # magic, version, packet_type, transfer_id, index, total, payload_length
 _HEADER = struct.Struct(">4sBB16sIIH")
@@ -28,8 +31,10 @@ class ProtocolError(ValueError):
 
 
 class PacketType(IntEnum):
-    MANIFEST = 1
+    CORE = 1
     DATA = 2
+    METADATA = 3
+    PARITY = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,45 +57,73 @@ class Packet:
 
 
 @dataclass(frozen=True, slots=True)
-class Manifest:
-    name: str
+class CoreManifest:
     size: int
     chunk_size: int
     total: int
     sha256: str
+    parity_group: int = PARITY_GROUP_SIZE
 
     def to_bytes(self) -> bytes:
         body = {
-            "name": self.name,
             "size": self.size,
             "chunk": self.chunk_size,
             "total": self.total,
             "sha256": self.sha256,
+            "parity": self.parity_group,
         }
-        return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return json.dumps(body, separators=(",", ":")).encode("utf-8")
 
     @classmethod
-    def from_bytes(cls, raw: bytes) -> "Manifest":
+    def from_bytes(cls, raw: bytes) -> "CoreManifest":
         try:
             data = json.loads(raw.decode("utf-8"))
             manifest = cls(
-                name=sanitize_filename(str(data["name"])),
                 size=int(data["size"]),
                 chunk_size=int(data["chunk"]),
                 total=int(data["total"]),
                 sha256=str(data["sha256"]).lower(),
+                parity_group=int(data.get("parity", PARITY_GROUP_SIZE)),
             )
         except (UnicodeDecodeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ProtocolError(f"invalid manifest: {exc}") from exc
+            raise ProtocolError(f"invalid core manifest: {exc}") from exc
 
-        if manifest.size < 0 or manifest.chunk_size <= 0 or manifest.total < 0:
-            raise ProtocolError("invalid manifest numeric values")
+        if manifest.size < 0 or not 128 <= manifest.chunk_size <= 1800 or manifest.total < 0:
+            raise ProtocolError("invalid core manifest numeric values")
+        if not 2 <= manifest.parity_group <= 32:
+            raise ProtocolError("invalid parity group size")
         if len(manifest.sha256) != 64 or any(c not in "0123456789abcdef" for c in manifest.sha256):
             raise ProtocolError("invalid manifest sha256")
         expected = math.ceil(manifest.size / manifest.chunk_size) if manifest.size else 0
         if expected != manifest.total:
             raise ProtocolError("manifest chunk count does not match size")
         return manifest
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateMetadata:
+    name: str
+    mime: str | None = None
+    modified_utc: str | None = None
+
+    def to_bytes(self) -> bytes:
+        body: dict[str, str] = {"name": sanitize_filename(self.name)}
+        if self.mime:
+            body["mime"] = self.mime
+        if self.modified_utc:
+            body["modified"] = self.modified_utc
+        return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> "PrivateMetadata":
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            name = sanitize_filename(str(data["name"]))
+            mime = str(data["mime"]) if data.get("mime") else None
+            modified = str(data["modified"]) if data.get("modified") else None
+        except (UnicodeDecodeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ProtocolError(f"invalid private metadata: {exc}") from exc
+        return cls(name=name, mime=mime, modified_utc=modified)
 
 
 def sanitize_filename(name: str) -> str:
@@ -100,6 +133,10 @@ def sanitize_filename(name: str) -> str:
     cleaned = "".join("_" if c in invalid or ord(c) < 32 else c for c in name)
     cleaned = cleaned.rstrip(" .")
     return cleaned or "received_file.bin"
+
+
+def generic_filename(transfer_id: bytes) -> str:
+    return f"received_{transfer_id.hex()[:12]}.bin"
 
 
 def transfer_id_hex(transfer_id: bytes) -> str:
@@ -160,47 +197,90 @@ def decode_packet(text: str) -> Packet:
         raise ProtocolError("payload length mismatch")
     if packet_type is PacketType.DATA and index >= total:
         raise ProtocolError("data packet index is outside total")
+    if packet_type is PacketType.PARITY and index >= total and total != 0:
+        raise ProtocolError("parity group start is outside total")
 
     return Packet(packet_type, transfer_id, index, total, payload)
 
 
-class TransferPackage:
-    """Prepared outbound transfer using the shared QRBeam wire protocol."""
+def xor_parity(chunks: list[bytes], chunk_size: int) -> bytes:
+    parity = bytearray(chunk_size)
+    for chunk in chunks:
+        if len(chunk) > chunk_size:
+            raise ValueError("chunk larger than parity size")
+        for index, value in enumerate(chunk):
+            parity[index] ^= value
+    return bytes(parity)
 
-    def __init__(self, file_path: str | os.PathLike[str], chunk_size: int = DEFAULT_CHUNK_SIZE) -> None:
+
+class TransferPackage:
+    """Prepared outbound transfer using QRBeam v2 with privacy and XOR recovery."""
+
+    def __init__(
+        self,
+        file_path: str | os.PathLike[str],
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        parity_group: int = PARITY_GROUP_SIZE,
+    ) -> None:
         path = Path(file_path)
         if not path.is_file():
             raise FileNotFoundError(path)
-        if not 128 <= chunk_size <= 1400:
-            raise ValueError("chunk_size must be between 128 and 1400 bytes")
+        if not 128 <= chunk_size <= 1800:
+            raise ValueError("chunk_size must be between 128 and 1800 bytes")
+        if not 2 <= parity_group <= 32:
+            raise ValueError("parity_group must be between 2 and 32")
 
         self.path = path
         self.data = path.read_bytes()
         self.chunk_size = chunk_size
+        self.parity_group = parity_group
         self.transfer_id = os.urandom(16)
         self.total = math.ceil(len(self.data) / chunk_size) if self.data else 0
-        self.manifest = Manifest(
-            name=sanitize_filename(path.name),
+        self.core = CoreManifest(
             size=len(self.data),
             chunk_size=chunk_size,
             total=self.total,
             sha256=hashlib.sha256(self.data).hexdigest(),
+            parity_group=parity_group,
         )
-        self._manifest_frame = encode_packet(
-            Packet(PacketType.MANIFEST, self.transfer_id, 0, self.total, self.manifest.to_bytes())
+        modified = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+        self.metadata = PrivateMetadata(
+            name=path.name,
+            mime=mimetypes.guess_type(path.name)[0],
+            modified_utc=modified,
+        )
+        self._core_frame = encode_packet(
+            Packet(PacketType.CORE, self.transfer_id, 0, self.total, self.core.to_bytes())
+        )
+        self._metadata_frame = encode_packet(
+            Packet(PacketType.METADATA, self.transfer_id, 0, self.total, self.metadata.to_bytes())
         )
         self._sequence: list[tuple[str, int]] = []
+        self._build_sequence()
+
+    def _build_sequence(self) -> None:
+        self._sequence = [("core", 0)]
         if self.total == 0:
-            self._sequence.append(("manifest", 0))
-        else:
-            for index in range(self.total):
-                if index % MANIFEST_INTERVAL == 0:
-                    self._sequence.append(("manifest", 0))
+            return
+        since_core = 0
+        for group_start in range(0, self.total, self.parity_group):
+            group_end = min(self.total, group_start + self.parity_group)
+            for index in range(group_start, group_end):
+                if since_core >= CORE_INTERVAL:
+                    self._sequence.append(("core", 0))
+                    since_core = 0
                 self._sequence.append(("data", index))
+                since_core += 1
+            self._sequence.append(("parity", group_start))
+            since_core += 1
 
     @property
     def cycle_frame_count(self) -> int:
         return len(self._sequence)
+
+    @property
+    def metadata_frame(self) -> str:
+        return self._metadata_frame
 
     def data_packet(self, index: int) -> Packet:
         if not 0 <= index < self.total:
@@ -209,19 +289,36 @@ class TransferPackage:
         payload = self.data[start : start + self.chunk_size]
         return Packet(PacketType.DATA, self.transfer_id, index, self.total, payload)
 
+    def parity_packet(self, group_start: int) -> Packet:
+        if not 0 <= group_start < self.total:
+            raise IndexError(group_start)
+        group_end = min(self.total, group_start + self.parity_group)
+        chunks = [self.data_packet(index).payload for index in range(group_start, group_end)]
+        return Packet(
+            PacketType.PARITY,
+            self.transfer_id,
+            group_start,
+            self.total,
+            xor_parity(chunks, self.chunk_size),
+        )
+
     def iter_cycle(self) -> Iterator[str]:
         for kind, index in self._sequence:
-            if kind == "manifest":
-                yield self._manifest_frame
+            if kind == "core":
+                yield self._core_frame
+            elif kind == "parity":
+                yield encode_packet(self.parity_packet(index))
             else:
                 yield encode_packet(self.data_packet(index))
 
     def frame_for_counter(self, counter: int) -> tuple[str, str]:
-        """Return frame text and a human-readable position for a repeating transfer."""
         if counter < 0:
             raise ValueError(counter)
         pos = counter % self.cycle_frame_count
         kind, index = self._sequence[pos]
-        if kind == "manifest":
-            return self._manifest_frame, "manifest"
+        if kind == "core":
+            return self._core_frame, "core"
+        if kind == "parity":
+            group_number = index // self.parity_group + 1
+            return encode_packet(self.parity_packet(index)), f"recovery {group_number}"
         return encode_packet(self.data_packet(index)), f"{index + 1}/{self.total}"
