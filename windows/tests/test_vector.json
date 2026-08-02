@@ -1,0 +1,8 @@
+{
+  "wire": "QRF1:UVJGMQECAAECAwQFBgcICQoLDA0ODwAAAAIAAAADAAtoZWxsbwB3b3JsZId87qg",
+  "transfer_id_hex": "000102030405060708090a0b0c0d0e0f",
+  "packet_type": 2,
+  "index": 2,
+  "total": 3,
+  "payload_hex": "68656c6c6f00776f726c64"
+}
