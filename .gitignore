@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Build outputs
+windows/build/
+windows/dist/
+windows/*.spec
+build/
+Payload/
+*.ipa
+
+# Apple/Xcode
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
