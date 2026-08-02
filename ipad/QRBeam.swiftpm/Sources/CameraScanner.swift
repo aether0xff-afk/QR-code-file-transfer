@@ -10,7 +10,7 @@ final class CameraScanner: NSObject, ObservableObject, AVCaptureMetadataOutputOb
     var onCode: ((String) -> Void)?
 
     private let sessionQueue = DispatchQueue(label: "QRBeam.camera.session")
-    private let metadataQueue = DispatchQueue(label: "QRBeam.camera.metadata")
+    private let metadataQueue = DispatchQueue(label: "QRBeam.camera.metadata", qos: .userInitiated)
     private var configured = false
     private var lastCode = ""
     private var lastCodeTime = Date.distantPast
@@ -57,7 +57,7 @@ final class CameraScanner: NSObject, ObservableObject, AVCaptureMetadataOutputOb
                 self.session.startRunning()
                 DispatchQueue.main.async {
                     self.isRunning = true
-                    self.status = "QR 코드를 비추세요."
+                    self.status = "QR 코드를 비추세요 · 가능하면 60FPS 캡처"
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -75,6 +75,8 @@ final class CameraScanner: NSObject, ObservableObject, AVCaptureMetadataOutputOb
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
             throw NSError(domain: "QRBeam", code: 10, userInfo: [NSLocalizedDescriptionKey: "후면 카메라를 찾을 수 없습니다."])
         }
+        try configureDevice(device)
+
         let input = try AVCaptureDeviceInput(device: device)
         guard session.canAddInput(input) else {
             throw NSError(domain: "QRBeam", code: 11, userInfo: [NSLocalizedDescriptionKey: "카메라 입력을 추가할 수 없습니다."])
@@ -90,22 +92,44 @@ final class CameraScanner: NSObject, ObservableObject, AVCaptureMetadataOutputOb
         output.metadataObjectTypes = [.qr]
     }
 
+    private func configureDevice(_ device: AVCaptureDevice) throws {
+        try device.lockForConfiguration()
+        defer { device.unlockForConfiguration() }
+
+        if device.isFocusModeSupported(.continuousAutoFocus) {
+            device.focusMode = .continuousAutoFocus
+        }
+        if device.isExposureModeSupported(.continuousAutoExposure) {
+            device.exposureMode = .continuousAutoExposure
+        }
+
+        let supports60 = device.activeFormat.videoSupportedFrameRateRanges.contains {
+            $0.minFrameRate <= 60 && $0.maxFrameRate >= 60
+        }
+        if supports60 {
+            let duration = CMTime(value: 1, timescale: 60)
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+        }
+    }
+
     func metadataOutput(
         _ output: AVCaptureMetadataOutput,
         didOutput metadataObjects: [AVMetadataObject],
         from connection: AVCaptureConnection
     ) {
-        guard let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
-              object.type == .qr,
-              let value = object.stringValue,
-              value.hasPrefix(qrWirePrefix) else { return }
+        for case let object as AVMetadataMachineReadableCodeObject in metadataObjects {
+            guard object.type == .qr,
+                  let value = object.stringValue,
+                  value.hasPrefix(qrWirePrefix) else { continue }
 
-        let now = Date()
-        if value == lastCode && now.timeIntervalSince(lastCodeTime) < 0.18 { return }
-        lastCode = value
-        lastCodeTime = now
-        DispatchQueue.main.async { [weak self] in
-            self?.onCode?(value)
+            let now = Date()
+            if value == lastCode && now.timeIntervalSince(lastCodeTime) < 0.025 { continue }
+            lastCode = value
+            lastCodeTime = now
+            DispatchQueue.main.async { [weak self] in
+                self?.onCode?(value)
+            }
         }
     }
 }

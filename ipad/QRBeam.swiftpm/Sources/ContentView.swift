@@ -22,14 +22,14 @@ struct SendView: View {
         NavigationStack {
             GeometryReader { proxy in
                 HStack(spacing: 24) {
-                    VStack(spacing: 16) {
+                    VStack(spacing: 12) {
                         Group {
                             if let qrImage = model.qrImage {
                                 Image(uiImage: qrImage)
                                     .interpolation(.none)
                                     .resizable()
                                     .scaledToFit()
-                                    .padding(20)
+                                    .padding(18)
                                     .background(.white)
                                     .clipShape(RoundedRectangle(cornerRadius: 22))
                                     .shadow(radius: 6)
@@ -37,7 +37,7 @@ struct SendView: View {
                                 ContentUnavailableView(
                                     "파일을 선택하세요",
                                     systemImage: "doc.badge.plus",
-                                    description: Text("파일 바이트를 여러 QR 프레임으로 나눠 표시합니다.")
+                                    description: Text("복구 QR이 포함된 고속 애니메이션 QR로 전송합니다.")
                                 )
                             }
                         }
@@ -47,8 +47,12 @@ struct SendView: View {
                         Text(model.frameLabel)
                             .font(.footnote.monospacedDigit())
                             .foregroundStyle(.secondary)
+                        Text(model.timingText)
+                            .font(.footnote.monospacedDigit())
+                        Text(model.throughputText)
+                            .font(.footnote.monospacedDigit())
                     }
-                    .frame(width: max(420, proxy.size.width * 0.62))
+                    .frame(width: max(440, proxy.size.width * 0.62))
 
                     Form {
                         Section("파일") {
@@ -60,13 +64,41 @@ struct SendView: View {
                                 .foregroundStyle(.secondary)
                         }
 
-                        Section("전송 설정") {
-                            VStack(alignment: .leading) {
-                                Text("속도: \(Int(model.fps)) FPS")
-                                Slider(value: $model.fps, in: 1...12, step: 1)
+                        Section("안정적인 고속 전송") {
+                            Picker("속도 프로필", selection: $model.speedProfile) {
+                                ForEach(SendSpeedProfile.allCases) { profile in
+                                    Text(profile.title).tag(profile)
+                                }
                             }
-                            Stepper("청크: \(model.chunkSize) bytes", value: $model.chunkSize, in: 256...1000, step: 50)
-                                .disabled(model.qrImage != nil)
+                            .pickerStyle(.menu)
+                            .disabled(model.isPlaying)
+
+                            Text(model.speedProfile.note)
+                                .font(.footnote)
+                                .foregroundStyle(
+                                    model.speedProfile == .turbo ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary)
+                                )
+
+                            Stepper(
+                                "청크: \(model.chunkSize) bytes",
+                                value: $model.chunkSize,
+                                in: 600...1400,
+                                step: 100
+                            )
+                            .disabled(model.qrImage != nil)
+
+                            Text("기본 안정 모드는 60Hz 화면에서 같은 QR을 4프레임 유지합니다. 데이터 8개마다 XOR 복구 QR을 추가합니다.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Section("개인정보") {
+                            Text(model.privacyText)
+                                .font(.footnote)
+                            Button("파일 정보 QR 보내기 · 3초") {
+                                model.showMetadataTemporarily()
+                            }
+                            .disabled(model.qrImage == nil)
                         }
 
                         Section {
@@ -77,12 +109,12 @@ struct SendView: View {
                             .disabled(model.qrImage == nil)
                         }
 
-                        Section("사용 팁") {
-                            Text("화면 밝기를 높이고 두 기기를 정면으로 맞추세요. 일부 QR을 놓쳐도 전체 프레임이 반복됩니다.")
+                        Section("무결성") {
+                            Text("프레임마다 CRC32를 검사하고, 완성된 파일의 SHA-256이 원본과 같을 때만 완료 처리합니다.")
                                 .font(.footnote)
                         }
                     }
-                    .frame(maxWidth: 380)
+                    .frame(maxWidth: 400)
                 }
                 .padding(24)
             }
@@ -125,7 +157,10 @@ struct ReceiveView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 22))
                         RoundedRectangle(cornerRadius: 16)
                             .stroke(.white.opacity(0.9), lineWidth: 4)
-                            .frame(width: min(440, proxy.size.width * 0.42), height: min(440, proxy.size.width * 0.42))
+                            .frame(
+                                width: min(440, proxy.size.width * 0.42),
+                                height: min(440, proxy.size.width * 0.42)
+                            )
                         VStack {
                             Spacer()
                             Text(model.scanner.status)
@@ -145,7 +180,22 @@ struct ReceiveView: View {
                             ProgressView(value: model.progress)
                             Text(model.receivedText)
                                 .font(.body.monospacedDigit())
+                            Text(model.timingText)
+                                .font(.footnote.monospacedDigit())
+                            Text(model.throughputText)
+                                .font(.footnote.monospacedDigit())
+                            Text(model.metadataText)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                             Text(model.status)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Section("저장 이름") {
+                            TextField("파일 이름", text: $model.exportFilename)
+                                .textInputAutocapitalization(.never)
+                            Text("파일 정보 QR을 받지 않아도 원하는 이름으로 저장할 수 있습니다.")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
@@ -162,15 +212,15 @@ struct ReceiveView: View {
                         }
 
                         if let file = model.completedFile {
-                            Section("완료") {
+                            Section("완료 · SHA-256 확인됨") {
                                 Button("파일 앱에 저장") { exporterPresented = true }
                                     .buttonStyle(.borderedProminent)
-                                Text("\(file.name) · \(file.data.count.formatted()) bytes")
+                                Text("\(file.data.count.formatted()) bytes")
                                     .font(.footnote)
                             }
                         }
                     }
-                    .frame(maxWidth: 390)
+                    .frame(maxWidth: 410)
                 }
                 .padding(24)
             }
@@ -179,7 +229,7 @@ struct ReceiveView: View {
                 isPresented: $exporterPresented,
                 document: ReceivedFileDocument(data: model.completedFile?.data ?? Data()),
                 contentType: .data,
-                defaultFilename: model.completedFile?.name ?? "received_file.bin"
+                defaultFilename: safeFilename(model.exportFilename)
             ) { result in
                 if case .failure(let error) = result {
                     model.errorMessage = error.localizedDescription
@@ -203,13 +253,17 @@ struct AboutView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("QRBeam 0.1") {
-                    Text("파일을 700바이트 안팎의 청크로 분할해 애니메이션 QR로 전송합니다.")
-                    Text("각 프레임은 CRC32로 검사하고, 완성된 파일은 SHA-256으로 원본과 같은지 확인합니다.")
+                Section("QRBeam 0.2") {
+                    Text("기본 청크 1,400바이트와 60Hz 기반 15 QR/s 안정 모드를 사용합니다.")
+                    Text("고속 30 QR/s와 터보 60 QR/s는 환경이 안정적일 때 선택할 수 있습니다.")
                 }
-                Section("현재 한계") {
-                    Text("초기 버전은 속도보다 안정성을 우선합니다. 1~5MB 파일에서 먼저 시험하는 것을 권장합니다.")
-                    Text("암호화와 누락 청크 역방향 요청은 다음 버전에서 추가할 수 있습니다.")
+                Section("안정성") {
+                    Text("데이터 8개마다 XOR 복구 QR을 보내 한 그룹에서 누락 하나를 즉시 복원합니다.")
+                    Text("CRC32와 최종 SHA-256 검증을 모두 통과해야만 파일을 내보낼 수 있습니다.")
+                }
+                Section("개인정보") {
+                    Text("파일명·확장자·MIME·수정 시각은 기본 데이터 흐름에 포함되지 않습니다.")
+                    Text("송신자가 ‘파일 정보 QR 보내기’를 누른 경우에만 원래 파일 정보를 받습니다.")
                 }
             }
             .navigationTitle("정보")

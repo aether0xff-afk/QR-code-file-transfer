@@ -1,17 +1,20 @@
 import Foundation
 
-let qrWirePrefix = "QRF1:"
-let qrMagic = Data("QRF1".utf8)
-let qrProtocolVersion: UInt8 = 1
-let qrDefaultChunkSize = 700
-let qrManifestInterval = 24
+let qrWirePrefix = "QRF2:"
+let qrMagic = Data("QRF2".utf8)
+let qrProtocolVersion: UInt8 = 2
+let qrDefaultChunkSize = 1400
+let qrCoreInterval = 96
+let qrParityGroupSize = 8
 
 private let qrHeaderSize = 4 + 1 + 1 + 16 + 4 + 4 + 2
 private let qrCRCSize = 4
 
 enum QRPacketType: UInt8 {
-    case manifest = 1
+    case core = 1
     case data = 2
+    case metadata = 3
+    case parity = 4
 }
 
 struct QRPacket: Equatable {
@@ -44,7 +47,8 @@ enum QRProtocolError: LocalizedError {
     case payloadTooLarge
     case payloadLengthMismatch
     case indexOutOfRange
-    case invalidManifest
+    case invalidCore
+    case invalidMetadata
     case incompleteTransfer
     case sizeMismatch
     case hashMismatch
@@ -62,7 +66,8 @@ enum QRProtocolError: LocalizedError {
         case .payloadTooLarge: return "QR 페이로드가 너무 큽니다."
         case .payloadLengthMismatch: return "페이로드 길이가 맞지 않습니다."
         case .indexOutOfRange: return "청크 번호가 범위를 벗어났습니다."
-        case .invalidManifest: return "파일 정보 프레임이 잘못되었습니다."
+        case .invalidCore: return "필수 복원 정보가 잘못되었습니다."
+        case .invalidMetadata: return "파일 정보 프레임이 잘못되었습니다."
         case .incompleteTransfer: return "아직 모든 청크를 받지 못했습니다."
         case .sizeMismatch: return "복원된 파일 크기가 다릅니다."
         case .hashMismatch: return "SHA-256 검증에 실패했습니다."
@@ -70,19 +75,19 @@ enum QRProtocolError: LocalizedError {
     }
 }
 
-struct TransferManifest: Codable, Equatable {
-    let name: String
+struct CoreManifest: Codable, Equatable {
     let size: Int
     let chunkSize: Int
     let total: Int
     let sha256: String
+    let parityGroup: Int
 
     enum CodingKeys: String, CodingKey {
-        case name
         case size
         case chunkSize = "chunk"
         case total
         case sha256
+        case parityGroup = "parity"
     }
 
     func encoded() throws -> Data {
@@ -91,22 +96,54 @@ struct TransferManifest: Codable, Equatable {
         return try encoder.encode(self)
     }
 
-    static func decode(_ data: Data) throws -> TransferManifest {
-        let manifest: TransferManifest
+    static func decode(_ data: Data) throws -> CoreManifest {
+        let manifest: CoreManifest
         do {
-            manifest = try JSONDecoder().decode(TransferManifest.self, from: data)
+            manifest = try JSONDecoder().decode(CoreManifest.self, from: data)
         } catch {
-            throw QRProtocolError.invalidManifest
+            throw QRProtocolError.invalidCore
         }
         let expected = manifest.size == 0 ? 0 : (manifest.size + manifest.chunkSize - 1) / manifest.chunkSize
         guard manifest.size >= 0,
-              manifest.chunkSize > 0,
+              (128...1800).contains(manifest.chunkSize),
               manifest.total == expected,
+              (2...32).contains(manifest.parityGroup),
               manifest.sha256.count == 64,
               manifest.sha256.allSatisfy({ $0.isHexDigit }) else {
-            throw QRProtocolError.invalidManifest
+            throw QRProtocolError.invalidCore
         }
         return manifest
+    }
+}
+
+struct TransferMetadata: Codable, Equatable {
+    let name: String
+    let mime: String?
+    let modifiedUTC: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case mime
+        case modifiedUTC = "modified"
+    }
+
+    func encoded() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        return try encoder.encode(self)
+    }
+
+    static func decode(_ data: Data) throws -> TransferMetadata {
+        do {
+            let value = try JSONDecoder().decode(TransferMetadata.self, from: data)
+            return TransferMetadata(
+                name: safeFilename(value.name),
+                mime: value.mime,
+                modifiedUTC: value.modifiedUTC
+            )
+        } catch {
+            throw QRProtocolError.invalidMetadata
+        }
     }
 }
 
@@ -143,13 +180,15 @@ enum QRWireCodec {
         guard let type = QRPacketType(rawValue: typeRaw) else { throw QRProtocolError.unknownPacketType(typeRaw) }
 
         let transferID = Data(body[(body.startIndex + 6)..<(body.startIndex + 22)])
-        let index = try Data(body).readUInt32BE(at: 22)
-        let total = try Data(body).readUInt32BE(at: 26)
-        let payloadLength = Int(try Data(body).readUInt16BE(at: 30))
+        let bodyData = Data(body)
+        let index = try bodyData.readUInt32BE(at: 22)
+        let total = try bodyData.readUInt32BE(at: 26)
+        let payloadLength = Int(try bodyData.readUInt16BE(at: 30))
         let payloadStart = qrHeaderSize
         let payloadEnd = payloadStart + payloadLength
         guard payloadEnd == body.count else { throw QRProtocolError.payloadLengthMismatch }
         if type == .data && index >= total { throw QRProtocolError.indexOutOfRange }
+        if type == .parity && total != 0 && index >= total { throw QRProtocolError.indexOutOfRange }
         let payload = Data(body[body.index(body.startIndex, offsetBy: payloadStart)..<body.endIndex])
         return try QRPacket(type: type, transferID: transferID, index: index, total: total, payload: payload)
     }
@@ -219,6 +258,16 @@ extension Data {
     }
 }
 
+func xorParity(chunks: [Data], chunkSize: Int) -> Data {
+    var parity = [UInt8](repeating: 0, count: chunkSize)
+    for chunk in chunks {
+        for (index, value) in chunk.enumerated() where index < chunkSize {
+            parity[index] ^= value
+        }
+    }
+    return Data(parity)
+}
+
 func safeFilename(_ value: String) -> String {
     let last = URL(fileURLWithPath: value).lastPathComponent
     let invalid = CharacterSet(charactersIn: "<>:\"/\\|?*").union(.controlCharacters)
@@ -227,6 +276,24 @@ func safeFilename(_ value: String) -> String {
     return result.isEmpty ? "received_file.bin" : result
 }
 
+func genericFilename(for transferID: Data) -> String {
+    let prefix = transferID.prefix(6).map { String(format: "%02x", $0) }.joined()
+    return "received_\(prefix).bin"
+}
+
 func randomTransferID() -> Data {
     Data((0..<16).map { _ in UInt8.random(in: 0...255) })
+}
+
+func formatDuration(_ seconds: TimeInterval?) -> String {
+    guard let seconds, seconds >= 0, seconds.isFinite else { return "계산 중…" }
+    var value = Int(seconds.rounded())
+    let hours = value / 3600
+    value %= 3600
+    let minutes = value / 60
+    let secs = value % 60
+    if hours > 0 {
+        return String(format: "%02d:%02d:%02d", hours, minutes, secs)
+    }
+    return String(format: "%02d:%02d", minutes, secs)
 }
