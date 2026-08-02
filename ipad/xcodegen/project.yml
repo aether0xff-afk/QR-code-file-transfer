@@ -16,7 +16,11 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aether.qrbeam
         TARGETED_DEVICE_FAMILY: "2"
-        INFOPLIST_KEY_NSCameraUsageDescription: QR 파일 전송 프레임을 인식하기 위해 카메라를 사용합니다.
+        INFOPLIST_KEY_NSCameraUsageDescription: QR 연결 정보와 QR 파일 전송 프레임을 인식하기 위해 카메라를 사용합니다.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: 오프라인 Windows 수신 서버로 파일을 직접 전송하기 위해 로컬 네트워크를 사용합니다.
+        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
+        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: YES
+        CODE_SIGN_ENTITLEMENTS: QRBeam.entitlements
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
     scheme:
