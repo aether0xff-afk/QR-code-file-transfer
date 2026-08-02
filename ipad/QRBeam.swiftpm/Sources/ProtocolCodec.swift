@@ -202,16 +202,20 @@ extension Data {
 
     func readUInt16BE(at offset: Int) throws -> UInt16 {
         guard offset >= 0, offset + 2 <= count else { throw QRProtocolError.frameTooShort }
-        return (UInt16(self[index(startIndex, offsetBy: offset)]) << 8)
-            | UInt16(self[index(startIndex, offsetBy: offset + 1)])
+        let byte0 = UInt16(self[index(startIndex, offsetBy: offset)])
+        let byte1 = UInt16(self[index(startIndex, offsetBy: offset + 1)])
+        return (byte0 << 8) | byte1
     }
 
     func readUInt32BE(at offset: Int) throws -> UInt32 {
         guard offset >= 0, offset + 4 <= count else { throw QRProtocolError.frameTooShort }
-        return (UInt32(self[index(startIndex, offsetBy: offset)]) << 24)
-            | (UInt32(self[index(startIndex, offsetBy: offset + 1)]) << 16)
-            | (UInt32(self[index(startIndex, offsetBy: offset + 2)]) << 8)
-            | UInt32(self[index(startIndex, offsetBy: offset + 3)])
+        let byte0 = UInt32(self[index(startIndex, offsetBy: offset)])
+        let byte1 = UInt32(self[index(startIndex, offsetBy: offset + 1)])
+        let byte2 = UInt32(self[index(startIndex, offsetBy: offset + 2)])
+        let byte3 = UInt32(self[index(startIndex, offsetBy: offset + 3)])
+        let high = (byte0 << 24) | (byte1 << 16)
+        let low = (byte2 << 8) | byte3
+        return high | low
     }
 }
 
