@@ -64,11 +64,11 @@ private func sha256File(_ url: URL) throws -> String {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     var hasher = SHA256()
-    while autoreleasepool(invoking: {
-        guard let data = try? handle.read(upToCount: 1024 * 1024), let data, !data.isEmpty else { return false }
+    while true {
+        let data = try handle.read(upToCount: 1024 * 1024) ?? Data()
+        if data.isEmpty { break }
         hasher.update(data: data)
-        return true
-    }) {}
+    }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()
 }
 
