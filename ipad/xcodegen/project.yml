@@ -1,0 +1,23 @@
+name: QRBeam
+options:
+  bundleIdPrefix: com.aether
+settings:
+  base:
+    IPHONEOS_DEPLOYMENT_TARGET: 17.0
+    SWIFT_VERSION: 5.0
+targets:
+  QRBeam:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: ../QRBeam.swiftpm/Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aether.qrbeam
+        TARGETED_DEVICE_FAMILY: "2"
+        INFOPLIST_KEY_NSCameraUsageDescription: QR 파일 전송 프레임을 인식하기 위해 카메라를 사용합니다.
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+    scheme:
+      testTargets: []
