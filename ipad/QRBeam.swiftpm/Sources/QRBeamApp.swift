@@ -4,7 +4,7 @@ import SwiftUI
 struct QRBeamApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            QRBeamRootView()
         }
     }
 }
