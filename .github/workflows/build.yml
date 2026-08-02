@@ -28,10 +28,20 @@ jobs:
           cache: pip
           cache-dependency-path: windows/requirements.txt
 
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Build internet-free SoftAP helper
+        run: |
+          dotnet publish softap/QRBeam.SoftAP.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o softap/publish
+          .\softap\publish\QRBeam-SoftAP.exe --ssid QRBeam-CI --password TestPass1234 --validate-only
 
       - name: Run protocol tests
         run: python -m unittest discover -s tests -v
@@ -43,13 +53,15 @@ jobs:
         run: pyinstaller --noconfirm --clean --onefile --windowed --name QRBeam app.py
 
       - name: Build offline receiver EXE
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name QRBeam-Offline offline_app.py
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name QRBeam-Offline --add-binary "softap/publish/QRBeam-SoftAP.exe;." offline_app.py
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: QRBeam-Windows
-          path: windows/dist/*.exe
+          path: |
+            windows/dist/*.exe
+            windows/softap/publish/QRBeam-SoftAP.exe
           if-no-files-found: error
 
   ipad:
