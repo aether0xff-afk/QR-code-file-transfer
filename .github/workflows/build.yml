@@ -1,0 +1,95 @@
+name: Build QRBeam
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows EXE
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: windows/requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run protocol tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Run optical QR round-trip
+        run: python tests/optical_roundtrip.py
+
+      - name: Build EXE
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name QRBeam app.py
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QRBeam-Windows
+          path: windows/dist/QRBeam.exe
+          if-no-files-found: error
+
+  ipad:
+    name: iPad unsigned IPA
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec ipad/xcodegen/project.yml --project ipad/xcodegen
+
+      - name: Build unsigned iPad app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ipad/xcodegen/QRBeam.xcodeproj \
+            -scheme QRBeam \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/ipad \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | xcpretty
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="build/ipad/Build/Products/Release-iphoneos/QRBeam.app"
+          test -d "$APP_PATH"
+          rm -rf build/Payload
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          ditto -c -k --sequesterRsrc --keepParent build/Payload build/QRBeam-unsigned.ipa
+
+      - name: Upload iPad artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QRBeam-iPad-unsigned
+          path: build/QRBeam-unsigned.ipa
+          if-no-files-found: error
